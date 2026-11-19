@@ -1,0 +1,5 @@
+# personal library, covers, icons, settings and the window's browser profile
+data/
+__pycache__/
+*.pyc
+*.lnk
