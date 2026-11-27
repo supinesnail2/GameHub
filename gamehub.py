@@ -46,7 +46,8 @@ def find(lib, gid):
 
 
 def is_uri(p):
-    return bool(re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]{1,}://", p or ""))
+    # xxx:// links (steam://, com.epicgames...) and shell: links (Store apps via shell:AppsFolder\<AppID>)
+    return bool(re.match(r"^(?:[a-zA-Z][a-zA-Z0-9+.-]{1,}://|shell:)", p or ""))
 
 
 # ---------- icons ----------
@@ -56,20 +57,53 @@ def icon_source(g):
     return p if p and not is_uri(p) and os.path.exists(p) else None
 
 
+def icon_path(gid):
+    return os.path.join(ICONS, gid + ".256.png")
+
+
 def extract_icon(g):
-    out = os.path.join(ICONS, g["id"] + ".png")
+    out = icon_path(g["id"])
     if os.path.exists(out):
         return out
     src = icon_source(g)
+    if not src and (g.get("path") or "").lower().startswith("shell:appsfolder\\"):
+        return store_app_icon(g["path"].split("\\", 1)[1], out)
     if not src:
         return None
+    if src.lower().endswith(".lnk"):
+        src = resolve_lnk(src) or src
+    # the big (up to 256px) icon from the exe; falls back to the small associated icon
     ps = ("Add-Type -AssemblyName System.Drawing;"
-          "$i=[System.Drawing.Icon]::ExtractAssociatedIcon($env:GH_SRC);"
+          "Add-Type -Namespace W -Name I -MemberDefinition '[DllImport(\"user32.dll\",CharSet=CharSet.Unicode)]"
+          "public static extern uint PrivateExtractIcons(string f,int i,int cx,int cy,IntPtr[] h,uint[] id,uint n,uint fl);';"
+          "$h=New-Object IntPtr[] 1;$id=New-Object uint32[] 1;$i=$null;"
+          "if([W.I]::PrivateExtractIcons($env:GH_SRC,0,256,256,$h,$id,1,0) -eq 1 -and $h[0] -ne [IntPtr]::Zero)"
+          "{$i=[System.Drawing.Icon]::FromHandle($h[0])}"
+          "if(-not $i){$i=[System.Drawing.Icon]::ExtractAssociatedIcon($env:GH_SRC)}"
           "if($i){$i.ToBitmap().Save($env:GH_OUT,[System.Drawing.Imaging.ImageFormat]::Png)}")
     env = dict(os.environ, GH_SRC=src, GH_OUT=out)
     try:
         subprocess.run(["powershell", "-NoProfile", "-Command", ps], env=env,
                        creationflags=NOWIN, timeout=15, capture_output=True)
+    except Exception:
+        pass
+    return out if os.path.exists(out) else None
+
+
+def store_app_icon(app_id, out):
+    """Logo of a Microsoft Store app (shell:AppsFolder\\<PackageFamily>!<App>), biggest scale."""
+    ps = r"""
+$fam,$app=$env:GH_APP.Split('!');$p=Get-AppxPackage | ? PackageFamilyName -eq $fam | select -First 1
+if(-not $p){exit};$m=[xml](Get-Content (Join-Path $p.InstallLocation 'AppxManifest.xml'))
+$a=$m.Package.Applications.Application | ? Id -eq $app | select -First 1
+$v=$a.ChildNodes | ? LocalName -eq 'VisualElements' | select -First 1
+$logo=$v.Square150x150Logo;if(-not $logo){$logo=$v.Square44x44Logo};if(-not $logo){exit}
+$base=Join-Path $p.InstallLocation $logo;$dir=Split-Path $base;$stem=[IO.Path]::GetFileNameWithoutExtension($base)
+$f=Get-ChildItem $dir -Filter "$stem*" -ErrorAction SilentlyContinue | ? Name -notmatch 'contrast' | sort Length -Descending | select -First 1
+if($f){Copy-Item $f.FullName $env:GH_OUT}"""
+    try:
+        subprocess.run(["powershell", "-NoProfile", "-Command", ps], env=dict(os.environ, GH_APP=app_id, GH_OUT=out),
+                       creationflags=NOWIN, timeout=30, capture_output=True)
     except Exception:
         pass
     return out if os.path.exists(out) else None
@@ -164,13 +198,350 @@ def _watch(gid, folder, count, wait_start):
     return secs
 
 
-def launch(g):
+# ---------- Lunar Client versions ----------
+LUNAR_SETTINGS = os.path.join(os.path.expanduser("~"), ".lunarclient", "settings")
+
+
+def lunar_running():
+    try:
+        out = subprocess.run(["tasklist", "/FI", "IMAGENAME eq Lunar Client.exe", "/NH"],
+                             capture_output=True, text=True, creationflags=NOWIN).stdout
+        return "Lunar Client.exe" in out
+    except Exception:
+        return False
+
+
+LUNAR_DB = os.path.join(os.path.expanduser("~"), ".lunarclient", "db", "profiles.db")
+LUNAR_API = "https://api.lunarclientprod.com/launcher/metadata/versions/"
+LUNAR_CATALOG = os.path.join(DATA, "lunar-versions.json")
+LUNAR_CATEGORIES = ("lunar", "vanilla", "badlion")
+LUNAR_CATEGORY_NAMES = {"lunar": "Lunar", "vanilla": "Vanilla", "badlion": "Badlion"}
+# loaders Lunar keeps in a profile row (it drops the rest, like "badlion")
+LUNAR_LOADERS = ("ichor", "fabric", "forge", "optifine", "neoforge", "quilt")
+
+
+def _ver_key(v):
+    return tuple(int(x) if x.isdigit() else -1 for x in re.split(r"[.\-]", v))
+
+
+def lunar_launcher_version():
+    try:
+        with open(os.path.join(LUNAR_SETTINGS, "cache.json"), encoding="utf-8") as f:
+            v = json.load(f)["__internal__"]["migrations"]["version"]
+        m = re.match(r"\d+\.\d+\.\d+", v)
+        if m:
+            return m.group()
+    except Exception:
+        pass
+    return "3.7.40"
+
+
+def lunar_catalog(refresh=False):
+    """Every version Lunar offers, per category, newest first.
+
+    Same lists the Lunar launcher shows (its public metadata API); cached in
+    data/lunar-versions.json for 6 hours and used offline when the API is down.
+    """
+    cached = None
+    try:
+        with open(LUNAR_CATALOG, encoding="utf-8") as f:
+            cached = json.load(f)
+    except Exception:
+        pass
+    if cached and not refresh and time.time() - cached.get("fetched", 0) < 6 * 3600:
+        return cached
+    try:
+        import urllib.request
+        q = f"?os=win32&arch=x64&launcher_version={lunar_launcher_version()}&branch=master"
+        cats = {}
+        for cat in LUNAR_CATEGORIES:
+            req = urllib.request.Request(LUNAR_API + cat + q, headers={"User-Agent": "GameHub"})
+            with urllib.request.urlopen(req, timeout=15) as r:
+                raw = json.load(r)["versions"]
+            majors = []
+            for m in raw:
+                subs = []
+                for s in m.get("subversions", []):
+                    mods = [{"id": x["id"], "name": x.get("name") or x["id"], "default": bool(x.get("default")),
+                             "loaders": x.get("loaders") or []}
+                            for x in sorted(s.get("modules", []), key=lambda x: x.get("sort", 0))]
+                    if mods:
+                        subs.append({"id": s["id"], "default": bool(s.get("default")), "modules": mods})
+                if subs:
+                    subs.sort(key=lambda s: _ver_key(s["id"]), reverse=True)
+                    majors.append({"id": m["id"], "name": m.get("name") or m["id"],
+                                   "description": m.get("description") or "", "subversions": subs})
+            majors.sort(key=lambda m: _ver_key(m["id"]), reverse=True)
+            cats[cat] = majors
+        data = {"fetched": time.time(), "categories": cats}
+        tmp = LUNAR_CATALOG + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+        os.replace(tmp, LUNAR_CATALOG)
+        return data
+    except Exception:
+        if cached:
+            return cached
+        raise
+
+
+def lunar_find(category, version):
+    for m in lunar_catalog()["categories"].get(category, []):
+        for s in m["subversions"]:
+            if s["id"] == version:
+                return m, s
+    return None, None
+
+
+def _lunar_db():
+    import sqlite3
+    con = sqlite3.connect(LUNAR_DB, timeout=5)
+    con.row_factory = sqlite3.Row
+    return con
+
+
+def lunar_select_profile(category, version, module):
+    """Point the Lunar profile for this major version at an exact version and
+    module (what picking them in Lunar's own version menu does), creating the
+    profile if this major version was never played. Returns the profile id."""
+    major, sub = lunar_find(category, version)
+    if not sub:
+        raise ValueError(f"Lunar doesn't offer {version} under {category}")
+    mod = next((x for x in sub["modules"] if x["id"] == module), None)
+    if not mod:
+        raise ValueError(f"{version} has no '{module}' option")
+    loaders = json.dumps([l for l in mod["loaders"] if l in LUNAR_LOADERS], separators=(",", ":"))
+    con = _lunar_db()
+    try:
+        with con:
+            row = con.execute(
+                "SELECT id FROM profiles WHERE type=? AND major_game_version=? AND provider IS NULL "
+                "AND temporary_of IS NULL ORDER BY created_at LIMIT 1", (category, major["id"])).fetchone()
+            if row:
+                pid = row["id"]
+                con.execute("UPDATE profiles SET game_version=?, lunar_module=?, loaders=? WHERE id=?",
+                            (version, module, loaders, pid))
+            else:
+                pid = str(uuid.uuid4())
+                path = {"lunar": "", "vanilla": "vanilla-", "badlion": "badlion-"}[category] + major["id"]
+                con.execute(
+                    "INSERT INTO profiles (id, name, description, path, type, major_game_version, game_version, "
+                    "loaders, use_lunar_features, is_badlion, lunar_module, created_at, config_version) "
+                    "VALUES (?,?,?,?,?,?,?,?,1,?,?,?,3)",
+                    (pid, f"Minecraft {major['id']}", major.get("description") or None, path, category,
+                     major["id"], version, loaders, 1 if category == "badlion" else 0, module, int(time.time())))
+    finally:
+        con.close()
+    return pid
+
+
+def lunar_state():
+    """What the picker shows: the catalog, the current selection and recent picks."""
+    cat = lunar_catalog()
+    current, recent = None, []
+    try:
+        with open(os.path.join(LUNAR_SETTINGS, "cache.json"), encoding="utf-8") as f:
+            hist = json.load(f).get("profileSelectHistory", {})
+        entries = sorted(((c, e) for c in LUNAR_CATEGORIES for e in hist.get(c, []) if e.get("version")),
+                         key=lambda ce: ce[1].get("time", 0), reverse=True)
+        seen = set()
+        for c, e in entries:
+            k = (c, e["version"], e.get("module"))
+            if k in seen or not lunar_find(c, e["version"])[1]:
+                continue
+            seen.add(k)
+            recent.append({"category": c, "version": e["version"], "module": e.get("module")})
+        current = recent[0] if recent else None
+    except Exception:
+        pass
+    # the profile row is the truth for what Lunar will launch
+    if current:
+        try:
+            con = _lunar_db()
+            major, _ = lunar_find(current["category"], current["version"])
+            row = con.execute("SELECT game_version, lunar_module FROM profiles WHERE type=? AND "
+                              "major_game_version=? AND provider IS NULL AND temporary_of IS NULL "
+                              "ORDER BY created_at LIMIT 1", (current["category"], major["id"])).fetchone()
+            con.close()
+            if row:
+                current = {"category": current["category"], "version": row[0], "module": row[1]}
+        except Exception:
+            pass
+    return {"categories": cat["categories"], "names": LUNAR_CATEGORY_NAMES, "current": current,
+            "recent": recent[:10], "running": lunar_running()}
+
+
+def close_lunar():
+    subprocess.run(["taskkill", "/IM", "Lunar Client.exe", "/F", "/T"], capture_output=True, creationflags=NOWIN)
+    for _ in range(20):
+        if not lunar_running():
+            return True
+        time.sleep(0.25)
+    return False
+
+
+def prepare_lunar(spec):
+    """Make the Lunar launcher open with a given version selected.
+
+    spec = {"category": "lunar"|"vanilla"|"badlion", "version": "1.8.9", "module": "lunar"|"fabric"|...}
+    The exact version and module live in the Lunar profile for that major
+    version (profiles.db); which profile is open comes from the newest entry of
+    profileSelectHistory[category] and settings.gameProfile, so all three are
+    set. Only possible while Lunar is closed: a running launcher keeps (and
+    later rewrites) its own copy.
+    """
+    if lunar_running():
+        return False
+    category = spec.get("category", "lunar")
+    if category in LUNAR_CATEGORIES:
+        pid = lunar_select_profile(category, spec["version"], spec.get("module", "lunar"))
+    else:
+        pid = spec["profileId"]
+    cache_p = os.path.join(LUNAR_SETTINGS, "cache.json")
+    launcher_p = os.path.join(LUNAR_SETTINGS, "launcher.json")
+    with open(cache_p, encoding="utf-8") as f:
+        cache = json.load(f)
+    hist = cache.setdefault("profileSelectHistory", {}).setdefault(category, [])
+    hist.insert(0, {"time": int(time.time() * 1000), "version": spec["version"],
+                    "module": spec.get("module", "lunar"), "profileId": pid})
+    spec = dict(spec, profileId=pid)
+    del hist[50:]
+    with open(launcher_p, encoding="utf-8") as f:
+        launcher = json.load(f)
+    launcher.setdefault("settings", {})["gameProfile"] = spec["profileId"]
+    for p, data, indent in ((cache_p, cache, None), (launcher_p, launcher, 2)):
+        tmp = p + ".gamehub.tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=indent)
+        os.replace(tmp, p)
+    return True
+
+
+def is_lunar_launcher(g):
+    return os.path.basename(g.get("path", "")).lower() == "lunar client.exe"
+
+
+# ---------- launchers (Lunar, Epic, Steam, ...) ----------
+LOCALAPP = os.environ.get("LOCALAPPDATA", "")
+PF86 = os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")
+PF = os.environ.get("ProgramFiles", r"C:\Program Files")
+KNOWN_LAUNCHERS = [
+    # (key, name, candidate paths)
+    ("lunar", "Lunar Client", [os.path.join(LOCALAPP, "Programs", "launcher", "Lunar Client.exe")]),
+    ("epic", "Epic Games Launcher", [os.path.join(PF86, r"Epic Games\Launcher\Portal\Binaries\Win64\EpicGamesLauncher.exe"),
+                                     os.path.join(PF86, r"Epic Games\Launcher\Portal\Binaries\Win32\EpicGamesLauncher.exe")]),
+    ("steam", "Steam", [os.path.join(PF86, r"Steam\steam.exe")]),
+    ("badlion", "Badlion Client", [os.path.join(LOCALAPP, "Programs", "Badlion Client", "Badlion Client.exe")]),
+    ("minecraft", "Minecraft Launcher", ["shell:AppsFolder\\Microsoft.4297127D64EC6_8wekyb3d8bbwe!Minecraft"]),
+    ("battlenet", "Battle.net", [os.path.join(PF86, r"Battle.net\Battle.net Launcher.exe")]),
+    ("plutonium", "Plutonium", [os.path.join(LOCALAPP, r"Plutonium\bin\plutonium-launcher-win32.exe")]),
+    ("curseforge", "CurseForge", [os.path.join(LOCALAPP, r"Programs\CurseForge Windows\CurseForge.exe")]),
+    ("xbox", "Xbox", ["shell:AppsFolder\\Microsoft.GamingApp_8wekyb3d8bbwe!Microsoft.Xbox.App"]),
+    ("ea", "EA app", [os.path.join(PF, r"Electronic Arts\EA Desktop\EA Desktop\EALauncher.exe")]),
+    ("ubisoft", "Ubisoft Connect", [os.path.join(PF86, r"Ubisoft\Ubisoft Game Launcher\UbisoftConnect.exe")]),
+    ("riot", "Riot Client", [r"C:\Riot Games\Riot Client\RiotClientServices.exe"]),
+    ("rockstar", "Rockstar Games Launcher", [os.path.join(PF, r"Rockstar Games\Launcher\Launcher.exe")]),
+    ("gog", "GOG Galaxy", [os.path.join(PF86, r"GOG Galaxy\GalaxyClient.exe")]),
+    ("modrinth", "Modrinth App", [os.path.join(LOCALAPP, r"Programs\modrinth-app\Modrinth App.exe"),
+                                  os.path.join(PF, r"Modrinth App\Modrinth App.exe")]),
+    ("prism", "Prism Launcher", [os.path.join(LOCALAPP, r"Programs\PrismLauncher\prismlauncher.exe"),
+                                 os.path.join(LOCALAPP, r"Programs\Prism Launcher\prismlauncher.exe")]),
+    ("hoyoplay", "HoYoPlay", [os.path.join(PF, r"HoYoPlay\launcher.exe"), os.path.join(LOCALAPP, r"HoYoPlay\launcher.exe")]),
+    ("itch", "itch", [os.path.join(LOCALAPP, r"itch\itch.exe")]),
+]
+_store_apps = {}
+
+
+def store_app_ids():
+    """AppIDs of installed Store apps (so Xbox / Minecraft Launcher only show when installed)."""
+    if "ids" not in _store_apps:
+        try:
+            r = subprocess.run(["powershell", "-NoProfile", "-Command", "Get-StartApps | % AppID"],
+                               capture_output=True, text=True, creationflags=NOWIN, timeout=30)
+            _store_apps["ids"] = {x.strip().lower() for x in r.stdout.splitlines() if x.strip()}
+        except Exception:
+            _store_apps["ids"] = set()
+    return _store_apps["ids"]
+
+
+def scan_launchers():
+    found = []
+    for key, name, paths in KNOWN_LAUNCHERS:
+        for p in paths:
+            ok = (p.split("\\", 1)[1].lower() in store_app_ids()) if p.startswith("shell:") else os.path.isfile(p)
+            if ok:
+                found.append({"name": name, "path": p, "source": "Launcher", "key": "launcher:" + key,
+                              "launcher": True})
+                break
+    return found
+
+
+def is_launcher_path(p):
+    p = os.path.normcase(p or "")
+    return any(os.path.normcase(c) == p for _, _, cs in KNOWN_LAUNCHERS for c in cs)
+
+
+def sync_launchers():
+    """Add installed launchers to the library, and move launcher entries already in it
+    (e.g. a "Lunar Client" tile added by hand) into the Launchers section."""
+    try:
+        found = scan_launchers()
+    except Exception:
+        return
+    with lock:
+        lib = load()
+        changed = False
+        paths = {os.path.normcase(g.get("path", "")) for g in lib["games"]}
+        for g in lib["games"]:
+            # plain launcher tiles only: a Lunar tile pinned to a Minecraft version stays a game
+            if "launcher" not in g and is_launcher_path(g.get("path")) and not g.get("args") \
+                    and not (g.get("lunar") or {}).get("profileId") and "(" not in g.get("name", ""):
+                g["launcher"] = True
+                changed = True
+        for x in found:
+            if os.path.normcase(x["path"]) not in paths:
+                x.update(id=uuid.uuid4().hex[:12], added=int(time.time()))
+                lib["games"].append(x)
+                changed = True
+        if changed:
+            save(lib)
+
+
+def launch_launcher(g):
+    """Open a launcher exactly like double-clicking it in Explorer: it starts on its own
+    (not as a child of GameHub), and an already-open launcher comes to the front."""
+    path = g.get("path", "")
+    if not is_uri(path) and not os.path.exists(path):
+        raise FileNotFoundError(path)
+    if g.get("args"):
+        os.startfile(path, "open", g["args"], g.get("cwd") or (None if is_uri(path) else os.path.dirname(path)))
+    else:
+        subprocess.Popen(["explorer.exe", path])
+    mark_launched(g["id"])
+
+
+def launch(g, prepared=False):
+    if g.get("lunar") and not prepared:
+        try:
+            prepare_lunar(g["lunar"])
+        except Exception as e:
+            print("Lunar version preselect failed:", e)
+    if g.get("launcher"):
+        return launch_launcher(g)     # launchers sit in the tray for hours: no play-time tracking
     path = g.get("path", "")
     args = g.get("args", "")
     gid = g["id"]
     cwd = g.get("cwd") or (os.path.dirname(path) if path and not is_uri(path) else None)
     # Steam already counts hours for its own games; GameHub counts everything else
     count = steam_appid(g) is None
+    if is_launcher_path(path) and not args:
+        # a game tile that opens through a launcher (e.g. a Lunar version tile): start the launcher
+        # detached like Explorer does, then time the game by watching its folder
+        launch_launcher(g)
+        folder = game_folder(g)
+        if folder:
+            threading.Thread(target=watch_folder, args=(gid, folder, count), daemon=True).start()
+        return
     if is_uri(path) or path.lower().endswith((".lnk", ".url")) or (not path.lower().endswith((".exe", ".bat", ".cmd")) and os.path.isfile(path)):
         # shortcuts, store URIs (steam://, com.epicgames...), ROM files etc. -> let Windows open them
         if args:
@@ -419,8 +790,9 @@ def import_scan():
     with lock:
         lib = load()
         keys = {g.get("key") for g in lib["games"]}
-        for g in scan_steam() + scan_epic():
-            if g["key"] in keys:
+        for g in scan_steam() + scan_epic() + scan_launchers():
+            if g["key"] in keys or (g.get("launcher") and is_launcher_path(g["path"])
+                                    and any(x.get("path") == g["path"] for x in lib["games"])):
                 continue
             g.update(id=uuid.uuid4().hex[:12], added=int(time.time()))
             lib["games"].append(g)
@@ -445,7 +817,28 @@ def store_cover(gid, value, field):
     return f"/api/img/{os.path.basename(dst)}"
 
 
-EDITABLE = ("name", "path", "args", "cwd", "cover", "hero", "favorite", "hidden", "notes", "category")
+# ---------- Switch mode quick apps ----------
+LOCAL = os.environ.get("LOCALAPPDATA", "")
+OPERA = os.path.join(LOCAL, "Programs", "Opera GX", "opera.exe")
+QUICK = {
+    # key: (label, how to start it)
+    "steam": ("Steam Big Picture", lambda: os.startfile("steam://open/bigpicture")),
+    "browser": ("Opera GX", lambda: subprocess.Popen([OPERA, "--start-fullscreen"]) if os.path.exists(OPERA)
+                else os.startfile("https://www.google.com")),
+    "youtube": ("YouTube", lambda: subprocess.Popen([OPERA, "--start-fullscreen", "https://www.youtube.com"])
+                if os.path.exists(OPERA) else os.startfile("https://www.youtube.com")),
+    "discord": ("Discord", lambda: subprocess.Popen([os.path.join(LOCAL, "Discord", "Update.exe"),
+                                                     "--processStart", "Discord.exe"])),
+}
+
+
+def quick_apps():
+    ok = {"browser": True, "youtube": True, "steam": bool(steam_path()),
+          "discord": os.path.exists(os.path.join(LOCAL, "Discord", "Update.exe"))}
+    return [{"key": k, "name": v[0]} for k, v in QUICK.items() if ok.get(k)]
+
+
+EDITABLE = ("name", "path", "args", "cwd", "cover", "hero", "favorite", "hidden", "notes", "category", "launcher")
 MIME = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp",
         ".gif": "image/gif", ".bmp": "image/bmp"}
 
@@ -478,9 +871,13 @@ class H(BaseHTTPRequestHandler):
 
     def do_GET(self):
         p = urlparse(self.path).path
-        if p == "/":
-            html = open(os.path.join(APP_DIR, "index.html"), encoding="utf-8").read()
+        if p in ("/", "/switch"):
+            page = "switch.html" if p == "/switch" else "index.html"
+            html = open(os.path.join(APP_DIR, page), encoding="utf-8").read()
             return self.send(200, html.replace("__TOKEN__", TOKEN), "text/html; charset=utf-8")
+        if p in ("/icon.png", "/favicon.ico"):
+            f = os.path.join(APP_DIR, "icon.png" if p == "/icon.png" else "gamehub.ico")
+            return self.send(200, open(f, "rb").read(), "image/png" if p == "/icon.png" else "image/x-icon")
         if p.startswith("/api/img/"):
             f = os.path.join(COVERS, os.path.basename(unquote(p[9:])))
             if os.path.isfile(f):
@@ -499,6 +896,13 @@ class H(BaseHTTPRequestHandler):
             lib = load()
             lib["games"] = [with_stats(g) for g in lib["games"]]
             return self.send(200, lib)
+        if p == "/api/quick":
+            return self.send(200, quick_apps())
+        if p == "/api/lunar":
+            try:
+                return self.send(200, lunar_state())
+            except Exception as e:
+                return self.send(502, {"error": f"Couldn't load Lunar's version list: {e}"})
         self.send(404)
 
     def do_POST(self):
@@ -531,7 +935,7 @@ class H(BaseHTTPRequestHandler):
                     g["cover"] = store_cover(g["id"], g.get("cover", ""), "cover")
                     g["hero"] = store_cover(g["id"], g.get("hero", ""), "hero")
                     if old_path != g.get("path"):
-                        ic = os.path.join(ICONS, g["id"] + ".png")
+                        ic = icon_path(g["id"])
                         if os.path.exists(ic):
                             os.remove(ic)
                     save(lib)
@@ -542,8 +946,36 @@ class H(BaseHTTPRequestHandler):
                     lib = load()
                     lib["games"] = [g for g in lib["games"] if g["id"] != gid]
                     save(lib)
-                for f in glob.glob(os.path.join(COVERS, gid + "-*")) + glob.glob(os.path.join(ICONS, gid + ".png")):
+                for f in glob.glob(os.path.join(COVERS, gid + "-*")) + glob.glob(os.path.join(ICONS, gid + ".*png")):
                     os.remove(f)
+                return self.send(200, {"ok": True})
+            if p.startswith("/api/lunar/launch/"):
+                # body: {category, version, module, close?}; picks the version, remembers it on the
+                # tile, then starts Lunar with it selected
+                data = self.body()
+                spec = {k: data.get(k) for k in ("category", "version", "module")}
+                if spec["category"] not in LUNAR_CATEGORIES or not spec["version"] or not spec["module"]:
+                    return self.send(400, {"error": "Pick a version and a module"})
+                with lock:
+                    lib = load()
+                    g = find(lib, p[18:])
+                    if not g:
+                        return self.send(404, {"error": "Game not found"})
+                    if lunar_running():
+                        if not data.get("close"):
+                            return self.send(409, {"error": "Lunar Client is open", "lunarOpen": True})
+                        if not close_lunar():
+                            return self.send(409, {"error": "Couldn't close Lunar Client", "lunarOpen": True})
+                    prepare_lunar(spec)
+                    g["lunar"] = spec
+                    save(lib)
+                launch(g, prepared=True)
+                return self.send(200, {"ok": True})
+            if p.startswith("/api/quick/"):
+                app = QUICK.get(p[11:])
+                if not app:
+                    return self.send(404, {"error": "Unknown app"})
+                app[1]()
                 return self.send(200, {"ok": True})
             if p.startswith("/api/launch/"):
                 g = find(load(), p[12:])
@@ -575,15 +1007,19 @@ def find_edge():
     return None
 
 
-def open_window(url):
+def open_window(url, fullscreen=False):
     edge = find_edge()
     if not edge:
         import webbrowser
         webbrowser.open(url)
         return
-    subprocess.Popen([edge, f"--app={url}", "--window-size=1360,860",
-                      f"--user-data-dir={os.path.join(DATA, 'window-profile')}",
-                      "--no-first-run", "--disable-features=Translate"])
+    # Switch mode gets its own profile so it always opens as a new fullscreen window
+    profile = "switch-profile" if fullscreen else "window-profile"
+    size = ["--start-fullscreen"] if fullscreen else ["--window-size=1360,860"]
+    subprocess.Popen([edge, f"--app={url}", *size,
+                      f"--user-data-dir={os.path.join(DATA, profile)}",
+                      "--no-first-run", "--disable-features=Translate",
+                      "--autoplay-policy=no-user-gesture-required"])
 
 
 def port_in_use():
@@ -592,14 +1028,17 @@ def port_in_use():
 
 
 def main():
+    # --switch: controller-friendly fullscreen "Switch mode" (used by the Moonlight/Sunshine tile)
+    switch = "--switch" in sys.argv[1:]
+    url = f"http://127.0.0.1:{PORT}/switch" if switch else f"http://127.0.0.1:{PORT}/"
     if port_in_use():
         # already running: just open another window onto it
-        open_window(f"http://127.0.0.1:{PORT}/")
+        open_window(url, switch)
         return
     srv = ThreadingHTTPServer(("127.0.0.1", PORT), H)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
-    threading.Thread(target=backfill_folders, daemon=True).start()
-    open_window(f"http://127.0.0.1:{PORT}/")
+    threading.Thread(target=lambda: (sync_launchers(), backfill_folders()), daemon=True).start()
+    open_window(url, switch)
     # exit once the window has been closed for a while and no tracked game is running
     while True:
         time.sleep(5)

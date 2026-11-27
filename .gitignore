@@ -3,3 +3,5 @@ data/
 __pycache__/
 *.pyc
 *.lnk
+# personal one-off scripts (hard-coded paths to this PC)
+tools/

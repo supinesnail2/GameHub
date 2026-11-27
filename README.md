@@ -8,6 +8,10 @@ A universal game launcher for Windows. Put every game in one Steam-style library
 - **Import installed games:** scans your Steam libraries (on every drive) and Epic Games, with cover and banner art pulled in for Steam games.
 - **Hours played:** Steam games show Steam's own play time. Every other game is timed by GameHub while it runs, including games whose launcher hands off to another program.
 - **Steam-style library:** cover grid, "Recently played" shelf, game pages with a big PLAY button, favourites, categories, notes, search, and sorting by name, most played or recently played.
+- **Launchers section:** Lunar Client, Epic Games, Steam, Badlion, Battle.net, CurseForge, Plutonium, the Minecraft Launcher, Xbox, EA app, Ubisoft Connect, Riot, GOG, Rockstar, Modrinth, Prism and HoYoPlay are found automatically and kept apart from your games. One click opens a launcher the way Explorer does (an open one comes to the front), and launchers aren't counted towards hours played. Right-click any tile, then **Move to Launchers**, to add your own.
+- **Minecraft versions through Lunar Client:** pick any version Lunar offers (Lunar, Vanilla or Badlion, with Fabric, Forge, OptiFine and so on) from the game page, and Lunar opens with it selected.
+- **Switch mode:** `pythonw gamehub.py --switch` opens a fullscreen, controller-friendly view, handy when streaming the PC to a TV or handheld.
+- **Sharp icons:** 256px icons pulled from each exe (and Store app logos), and a proper app icon on the GameHub window.
 - **Custom art:** set your own cover (portrait) and banner (wide) images per game.
 - **No installs:** pure Python standard library; the UI runs in a Microsoft Edge app window.
 

@@ -1,0 +1,286 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>GameHub · Switch mode</title>
+<link rel="icon" type="image/png" sizes="256x256" href="/icon.png">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+/* Switch mode: built for a 720p stream on a handheld, so everything is sized in vh and big */
+:root{
+  --bg:#0b0e14; --panel:#161b24; --line:#2a3342; --text:#eef2f8; --dim:#93a0b4;
+  --accent:#4f9dff; --play:#3fbf5f; --gold:#f5c542; --danger:#e25555;
+}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--text);font:2.4vh/1.35 "Segoe UI",system-ui,sans-serif;overflow:hidden;cursor:none;user-select:none}
+#bg{position:fixed;inset:-4vh;background-size:cover;background-position:center;filter:blur(3vh) brightness(.35) saturate(1.2);transition:background-image .4s;z-index:0}
+#bg::after{content:"";position:absolute;inset:0;background:linear-gradient(180deg,rgba(11,14,20,.3),var(--bg) 92%)}
+#top{position:fixed;top:0;left:0;right:0;height:9vh;display:flex;align-items:center;gap:2vh;padding:0 4.5vh;z-index:3}
+#top .logo{font-weight:700;font-size:3.2vh;letter-spacing:.02em}
+#top .logo span{color:var(--accent)}
+#top .sp{flex:1}
+#top .clock{font-size:3vh;font-variant-numeric:tabular-nums}
+#top .pad{font-size:2vh;color:var(--dim);padding:.6vh 1.4vh;border:1px solid var(--line);border-radius:3vh}
+#top .pad.on{color:var(--play);border-color:var(--play)}
+#rows{position:fixed;top:9vh;bottom:9vh;left:0;right:0;overflow:hidden;z-index:2}
+#rowsIn{transition:transform .25s ease}
+.row{padding:1.2vh 0 2.2vh}
+.row h2{margin:0 0 1.2vh 4.5vh;font-size:2.6vh;font-weight:600;color:var(--dim)}
+.row.cur h2{color:var(--text)}
+.strip{display:flex;gap:2vh;padding:1vh 4.5vh;transition:transform .2s ease;will-change:transform}
+.tile{flex:0 0 auto;position:relative;border-radius:1.4vh;overflow:hidden;background:var(--panel);outline:.5vh solid transparent;outline-offset:.4vh;transition:transform .15s,outline-color .15s}
+.tile.focus{outline-color:#fff;transform:scale(1.07);z-index:2;box-shadow:0 1.5vh 4vh rgba(0,0,0,.6)}
+/* quick apps: wide */
+.app{width:30vh;height:17vh;display:flex;flex-direction:column;justify-content:flex-end;padding:1.8vh 2vh}
+.app .ic{position:absolute;top:1.8vh;left:2vh;width:6vh;height:6vh}
+.app b{font-size:2.6vh}
+.app small{color:rgba(255,255,255,.75);font-size:1.8vh}
+/* games: portrait covers */
+.game{width:19vh;height:28.5vh}
+.game img.cv{width:100%;height:100%;object-fit:cover;display:block}
+.game .gen{width:100%;height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:1.4vh;padding:1.5vh;text-align:center;font-weight:600;font-size:2.2vh}
+.game .gen img{width:7vh;height:7vh;object-fit:contain}
+.game .name{position:absolute;left:0;right:0;bottom:0;padding:3vh 1.2vh 1vh;font-size:1.9vh;font-weight:600;background:linear-gradient(transparent,rgba(0,0,0,.85));opacity:0;transition:opacity .15s}
+.game.focus .name{opacity:1}
+.badge{position:absolute;top:1vh;font-size:1.6vh;font-weight:700;padding:.3vh 1vh;border-radius:2vh}
+.badge.fav{right:1vh;color:var(--gold);background:rgba(0,0,0,.6)}
+.badge.run{left:1vh;background:var(--play);color:#04140a}
+#info{position:fixed;left:4.5vh;right:4.5vh;bottom:9.5vh;z-index:3;display:none}
+#bar{position:fixed;left:0;right:0;bottom:0;height:9vh;display:flex;align-items:center;gap:3.5vh;padding:0 4.5vh;background:linear-gradient(transparent,rgba(0,0,0,.7));z-index:3;font-size:2.1vh;color:var(--dim)}
+#bar .sp{flex:1}
+#bar .now{color:var(--text);font-weight:600;font-size:2.4vh;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:60vw}
+.btn{display:inline-flex;align-items:center;justify-content:center;width:3.4vh;height:3.4vh;border-radius:50%;font-weight:700;font-size:1.8vh;color:#000;margin-right:.8vh;vertical-align:middle}
+.bA{background:#6ee36e}.bB{background:#ff6b6b}.bX{background:#5aa9ff}.bY{background:#ffd84d}
+.bS{border-radius:1vh;width:auto;padding:0 1vh;background:#cfd6e2}
+/* overlays */
+.ov{position:fixed;inset:0;z-index:10;display:none;align-items:center;justify-content:center;background:rgba(5,7,11,.82)}
+.ov.on{display:flex}
+#launching .box{text-align:center}
+#launching img{width:24vh;height:36vh;object-fit:cover;border-radius:1.6vh;box-shadow:0 2vh 6vh rgba(0,0,0,.7)}
+#launching h3{font-size:3.4vh;margin:2.5vh 0 .5vh}
+#launching p{color:var(--dim);margin:0}
+#menu .box{background:var(--panel);border:1px solid var(--line);border-radius:2vh;padding:2.5vh;min-width:56vh}
+#menu h3{margin:0 0 1.5vh;font-size:2.8vh}
+.mi{padding:1.6vh 2vh;border-radius:1.2vh;font-size:2.5vh;margin-top:.8vh;border:.4vh solid transparent}
+.mi.focus{border-color:#fff;background:#222b3a}
+#toast{position:fixed;left:50%;bottom:11vh;transform:translateX(-50%);background:#222b3a;border:1px solid var(--line);padding:1.4vh 2.6vh;border-radius:1.2vh;z-index:20;opacity:0;transition:opacity .2s;font-size:2.2vh}
+#toast.on{opacity:1}
+.empty{color:var(--dim);padding:2vh 4.5vh}
+</style>
+</head>
+<body>
+<div id="bg"></div>
+<div id="top">
+  <div class="logo">Game<span>Hub</span></div>
+  <div class="sp"></div>
+  <div class="pad" id="pad">🎮 No controller</div>
+  <div class="clock" id="clock"></div>
+</div>
+<div id="rows"><div id="rowsIn"></div></div>
+<div id="bar">
+  <div class="now" id="now"></div>
+  <div class="sp"></div>
+  <div><span class="btn bA">A</span>Open</div>
+  <div><span class="btn bX">X</span>Favorite</div>
+  <div><span class="btn bY">Y</span>Refresh</div>
+  <div><span class="btn bS">☰</span>Menu</div>
+</div>
+<div class="ov" id="launching"><div class="box"><div id="lArt"></div><h3 id="lName"></h3><p>Starting…</p></div></div>
+<div class="ov" id="menu"><div class="box"><h3>GameHub</h3><div id="menuItems"></div></div></div>
+<div id="toast"></div>
+
+<script>
+const TOKEN="__TOKEN__";
+const $=id=>document.getElementById(id);
+const esc=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+async function api(path,body){
+  const r=await fetch(path,{method:body===undefined?"GET":"POST",
+    headers:{"X-Token":TOKEN,"Content-Type":"application/json"},body:body===undefined?undefined:JSON.stringify(body)});
+  const j=await r.json().catch(()=>({}));
+  if(!r.ok) throw new Error(j.error||("HTTP "+r.status));
+  return j;
+}
+function toast(m){const t=$("toast");t.textContent=m;t.classList.add("on");clearTimeout(t._h);t._h=setTimeout(()=>t.classList.remove("on"),2600)}
+function hue(s){let h=0;for(const c of s)h=(h*31+c.charCodeAt(0))%360;return h}
+const iconUrl=g=>`/api/icon/${g.id}?v=${encodeURIComponent(g.path||"")}`;
+
+// quick-app look (inline SVG icons, no external files)
+const APP_STYLE={
+  steam:{bg:"linear-gradient(135deg,#1b2838,#2a475e)",sub:"Your Steam library",
+    ic:'<svg viewBox="0 0 24 24" fill="#fff"><path d="M12 2a10 10 0 0 0-9.96 9.04l5.35 2.21a2.8 2.8 0 0 1 1.6-.5l2.39-3.46v-.05a3.78 3.78 0 1 1 3.78 3.78h-.09l-3.4 2.43a2.83 2.83 0 0 1-5.6.45L2.3 14.4A10 10 0 1 0 12 2zm-4.3 15.2-1.22-.5a2.13 2.13 0 1 0 1.17-2.9l1.27.52a1.57 1.57 0 1 1-1.22 2.88zm9.4-7.7a2.52 2.52 0 1 0-2.52 2.52 2.52 2.52 0 0 0 2.52-2.52zm-4.4 0a1.89 1.89 0 1 1 1.89 1.89 1.89 1.89 0 0 1-1.89-1.89z"/></svg>'},
+  browser:{bg:"linear-gradient(135deg,#4a0d1c,#b3123a)",sub:"Browse the web",
+    ic:'<svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2"><circle cx="12" cy="12" r="9"/><ellipse cx="12" cy="12" rx="4" ry="9"/><path d="M3 12h18"/></svg>'},
+  youtube:{bg:"linear-gradient(135deg,#5c0b0b,#e62117)",sub:"Watch videos",
+    ic:'<svg viewBox="0 0 24 24"><rect x="2" y="5" width="20" height="14" rx="4" fill="#fff"/><path d="M10 9l5 3-5 3z" fill="#e62117"/></svg>'},
+  discord:{bg:"linear-gradient(135deg,#2c2f7a,#5865f2)",sub:"Chat with friends",
+    ic:'<svg viewBox="0 0 24 24" fill="#fff"><path d="M19.3 5.3A16.6 16.6 0 0 0 15.2 4l-.5 1a15.4 15.4 0 0 0-5.4 0l-.5-1a16.6 16.6 0 0 0-4.1 1.3C2.1 9.2 1.4 13 1.8 16.7a16.7 16.7 0 0 0 5 2.5l1.1-1.7a10.7 10.7 0 0 1-1.7-.8l.4-.3a11.9 11.9 0 0 0 10.8 0l.4.3a10.7 10.7 0 0 1-1.7.8l1.1 1.7a16.7 16.7 0 0 0 5-2.5c.5-4.3-.8-8.1-2.9-11.4zM8.7 14.5c-1 0-1.8-.9-1.8-2s.8-2 1.8-2 1.8.9 1.8 2-.8 2-1.8 2zm6.6 0c-1 0-1.8-.9-1.8-2s.8-2 1.8-2 1.8.9 1.8 2-.8 2-1.8 2z"/></svg>'},
+};
+
+let games=[], quick=[], rows=[], r=0, c=[], menuOpen=false, menuIdx=0, busy=false;
+
+async function load(keep){
+  try{
+    const [lib,q]=await Promise.all([api("/api/games"),api("/api/quick")]);
+    games=lib.games.filter(g=>!g.hidden).sort((a,b)=>a.name.localeCompare(b.name,undefined,{sensitivity:"base"}));
+    quick=q;
+  }catch(e){toast(e.message)}
+  build(keep);
+}
+
+function build(keep){
+  const prevId=keep&&rows[r]?rows[r].items[c[r]||0]?.id:null, prevRow=keep?rows[r]?.key:null;
+  const recent=games.filter(g=>g.lastPlayed).sort((a,b)=>b.lastPlayed-a.lastPlayed).slice(0,12);
+  const favs=games.filter(g=>g.favorite);
+  rows=[
+    {key:"quick",title:"Quick launch",items:quick.map(a=>({...a,kind:"app"}))},
+    {key:"recent",title:"Continue playing",items:recent},
+    {key:"fav",title:"Favorites",items:favs},
+    {key:"all",title:`All games (${games.length})`,items:games},
+  ].filter(x=>x.items.length);
+  c=rows.map(()=>0);
+  if(prevRow){
+    const ri=rows.findIndex(x=>x.key===prevRow);
+    if(ri>=0){r=ri;const ci=rows[ri].items.findIndex(x=>x.id===prevId||x.key===prevId);c[ri]=Math.max(0,ci)}
+  } else r=0;
+  r=Math.min(r,rows.length-1);
+  render();
+}
+
+function tileHtml(it){
+  if(it.kind==="app"){
+    const s=APP_STYLE[it.key]||{bg:"#333",sub:"",ic:""};
+    return `<div class="tile app" style="background:${s.bg}"><div class="ic">${s.ic}</div><b>${esc(it.name)}</b><small>${esc(s.sub)}</small></div>`;
+  }
+  const h=hue(it.name);
+  const gen=`<div class="gen" style="background:linear-gradient(160deg,hsl(${h} 45% 28%),hsl(${(h+40)%360} 50% 12%))"><img src="${iconUrl(it)}" onerror="this.remove()"><div>${esc(it.name)}</div></div>`;
+  const art=it.cover?`<img class="cv" src="${esc(it.cover)}" onerror="this.replaceWith(document.createRange().createContextualFragment(this.dataset.gen))" data-gen="${esc(gen)}">`:gen;
+  return `<div class="tile game">${art}${it.favorite?'<div class="badge fav">★</div>':""}${it.running?'<div class="badge run">RUNNING</div>':""}<div class="name">${esc(it.name)}</div></div>`;
+}
+
+function render(){
+  if(!rows.length){$("rowsIn").innerHTML='<div class="empty">No games yet. Add some in the normal GameHub window.</div>';return}
+  $("rowsIn").innerHTML=rows.map((row,i)=>`<div class="row" data-r="${i}"><h2>${esc(row.title)}</h2><div class="strip">${row.items.map(tileHtml).join("")}</div></div>`).join("");
+  focus();
+}
+
+function focus(){
+  document.querySelectorAll(".tile.focus").forEach(t=>t.classList.remove("focus"));
+  document.querySelectorAll(".row").forEach((el,i)=>el.classList.toggle("cur",i===r));
+  const rowEl=document.querySelector(`.row[data-r="${r}"]`); if(!rowEl) return;
+  const strip=rowEl.querySelector(".strip"), tiles=strip.children, t=tiles[c[r]];
+  if(!t) return;
+  t.classList.add("focus");
+  // horizontal: keep the focused tile in view with a little look-ahead
+  // keep one tile of look-ahead on each side where possible
+  const pad=window.innerHeight*.045, view=window.innerWidth, look=t.offsetWidth*.6;
+  const left=t.offsetLeft-pad-look, right=t.offsetLeft+t.offsetWidth+pad+look;
+  let x=strip._x||0;
+  if(left+x<0) x=-left;
+  if(right+x>view) x=view-right;
+  x=Math.min(0,x); strip._x=x; strip.style.transform=`translateX(${x}px)`;
+  // vertical: current row near the top third
+  const rowsBox=$("rows"), target=Math.max(0,rowEl.offsetTop-rowsBox.clientHeight*.12);
+  const maxY=Math.max(0,$("rowsIn").scrollHeight-rowsBox.clientHeight);
+  $("rowsIn").style.transform=`translateY(${-Math.min(target,maxY)}px)`;
+  // background + now-selected bar
+  const it=rows[r].items[c[r]];
+  const art=it.kind==="app"?"":(it.hero||it.cover||"");
+  $("bg").style.backgroundImage=art?`url("${art}")`:"none";
+  $("now").textContent=it.kind==="app"?it.name:`${it.name}${it.running?"  ·  running":""}`;
+}
+
+function move(dr,dc){
+  if(menuOpen){menuIdx=(menuIdx+dr+MENU.length)%MENU.length;drawMenu();return}
+  if(!rows.length||busy) return;
+  if(dr){r=Math.max(0,Math.min(rows.length-1,r+dr))}
+  if(dc){c[r]=Math.max(0,Math.min(rows[r].items.length-1,c[r]+dc))}
+  focus();
+}
+
+async function activate(){
+  if(menuOpen){MENU[menuIdx].fn();return}
+  if(!rows.length||busy) return;
+  const it=rows[r].items[c[r]];
+  busy=true;
+  $("lArt").innerHTML=it.kind==="app"?`<div style="width:24vh;height:14vh;border-radius:1.6vh;background:${(APP_STYLE[it.key]||{}).bg};display:flex;align-items:center;justify-content:center"><div style="width:8vh;height:8vh">${(APP_STYLE[it.key]||{}).ic||""}</div></div>`
+    :(it.cover?`<img src="${esc(it.cover)}">`:"");
+  $("lName").textContent=it.name;
+  $("launching").classList.add("on");
+  try{
+    if(it.kind==="app") await api("/api/quick/"+it.key,{});
+    else await api("/api/launch/"+it.id,{});
+  }catch(e){toast(e.message)}
+  setTimeout(()=>{$("launching").classList.remove("on");busy=false;load(true)},3500);
+}
+
+async function toggleFav(){
+  if(menuOpen||!rows.length) return;
+  const it=rows[r].items[c[r]]; if(it.kind==="app") return;
+  try{await api("/api/save",{id:it.id,favorite:!it.favorite});toast(it.favorite?"Removed from favorites":"Added to favorites");load(true)}catch(e){toast(e.message)}
+}
+
+const MENU=[
+  {name:"Resume",fn:()=>closeMenu()},
+  {name:"Refresh library",fn:()=>{closeMenu();load(true);toast("Library refreshed")}},
+  {name:"Exit Switch mode",fn:()=>{window.close();setTimeout(()=>toast("Close this window with Alt+F4"),400)}},
+];
+function drawMenu(){$("menuItems").innerHTML=MENU.map((m,i)=>`<div class="mi ${i===menuIdx?"focus":""}">${esc(m.name)}</div>`).join("")}
+function openMenu(){menuOpen=true;menuIdx=0;drawMenu();$("menu").classList.add("on")}
+function closeMenu(){menuOpen=false;$("menu").classList.remove("on")}
+function back(){if(menuOpen) closeMenu()}
+
+// ---- keyboard (for testing at the PC) ----
+addEventListener("keydown",e=>{
+  const k=e.key;
+  if(k==="ArrowUp")move(-1,0);else if(k==="ArrowDown")move(1,0);
+  else if(k==="ArrowLeft")move(0,-1);else if(k==="ArrowRight")move(0,1);
+  else if(k==="Enter"||k===" ")activate();
+  else if(k==="Escape"||k==="Backspace")back();
+  else if(k==="f")toggleFav();else if(k==="r")load(true);
+  else if(k==="m"||k==="Tab")menuOpen?closeMenu():openMenu();
+  else return;
+  e.preventDefault();
+});
+
+// ---- gamepad (Moonlight → Sunshine shows the Switch controls as an Xbox 360 pad) ----
+// standard mapping: 0 A, 1 B, 2 X, 3 Y, 8 Back, 9 Start, 12-15 D-pad; axes 0/1 left stick
+const held={}, REPEAT_START=380, REPEAT_EVERY=110;
+function press(id,now,fn){
+  const h=held[id];
+  if(!h){held[id]={t:now,next:now+REPEAT_START};fn();return}
+  if(now>=h.next){h.next=now+REPEAT_EVERY;fn()}
+}
+function release(id){delete held[id]}
+function poll(){
+  const pads=[...(navigator.getGamepads?navigator.getGamepads():[])].filter(Boolean);
+  $("pad").textContent=pads.length?"🎮 Controller ready":"🎮 Press a button";
+  $("pad").classList.toggle("on",pads.length>0);
+  const now=performance.now();
+  const p=pads[0];
+  if(p&&document.hasFocus()){
+    const b=i=>p.buttons[i]&&p.buttons[i].pressed, ax=p.axes||[];
+    const dirs={up:b(12)||ax[1]<-.55,down:b(13)||ax[1]>.55,left:b(14)||ax[0]<-.55,right:b(15)||ax[0]>.55};
+    for(const [d,on] of Object.entries(dirs)){
+      if(on) press(d,now,()=>({up:()=>move(-1,0),down:()=>move(1,0),left:()=>move(0,-1),right:()=>move(0,1)})[d]());
+      else release(d);
+    }
+    // face/menu buttons fire once per press
+    const once=(i,fn)=>{if(b(i)){if(!held["b"+i]){held["b"+i]=1;fn()}}else delete held["b"+i]};
+    once(0,activate); once(1,back); once(2,toggleFav); once(3,()=>load(true));
+    once(9,()=>menuOpen?closeMenu():openMenu()); once(8,()=>menuOpen?closeMenu():openMenu());
+  }
+  requestAnimationFrame(poll);
+}
+requestAnimationFrame(poll);
+
+// clock + keep the background server alive + pick up running/finished games
+function tick(){$("clock").textContent=new Date().toLocaleTimeString([], {hour:"numeric",minute:"2-digit"})}
+tick(); setInterval(tick,10000);
+let lastRun="";
+setInterval(async()=>{try{const x=await api("/api/heartbeat",{});const k=x.running.join();if(k!==lastRun){lastRun=k;load(true)}}catch{}},5000);
+// coming back from a game: refresh "Continue playing"
+addEventListener("focus",()=>load(true));
+load(false);
+</script>
+</body>
+</html>
